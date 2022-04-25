@@ -173,6 +173,7 @@ def query_data_api(api_type, api_address, headers, headers_redact, retries, time
 
 class DataSourceScaleway(sources.DataSource):
     dsname = "Scaleway"
+    perform_dhcp_setup = True
     default_update_events = {
         EventScope.NETWORK: {
             EventType.BOOT_NEW_INSTANCE,
@@ -202,6 +203,9 @@ class DataSourceScaleway(sources.DataSource):
             self.headers_redact = SCW_METADATA_AUTH_TOKEN
             self.headers = {SCW_METADATA_AUTH_TOKEN: authToken}
 
+        perform_dhcp_setup = self.ds_cfg.get("dhcp", None)
+        if perform_dhcp_setup is not None:
+            self.perform_dhcp_setup = perform_dhcp_setup
         self.retries = int(self.ds_cfg.get("retries", DEF_MD_RETRIES))
         self.timeout = int(self.ds_cfg.get("timeout", DEF_MD_TIMEOUT))
         self._fallback_interface = None
@@ -228,19 +232,36 @@ class DataSourceScaleway(sources.DataSource):
         if not on_scaleway():
             return False
 
-        if self._fallback_interface is None:
-            self._fallback_interface = net.find_fallback_nic()
-        try:
-            with EphemeralDHCPv4(self._fallback_interface):
-                util.log_time(
+        if self.perform_dhcp_setup:  # Setup networking in init-local stage.
+            if self._fallback_interface is None:
+                self._fallback_interface = net.find_fallback_nic()
+            try:
+                with EphemeralDHCPv4(self._fallback_interface):
+                    util.log_time(
+                        logfunc=LOG.debug,
+                        msg="Crawl of metadata service",
+                        func=self._crawl_metadata,
+                    )
+            except (NoDHCPLeaseError) as e:
+                util.logexc(LOG, str(e))
+                return False
+            return True
+        else:
+            try:
+                md = util.log_time(
                     logfunc=LOG.debug,
-                    msg="Crawl of metadata service",
+                    msg="Crawl of metadata service without DHCP-configured networking",
                     func=self._crawl_metadata,
                 )
-        except (NoDHCPLeaseError) as e:
-            util.logexc(LOG, str(e))
-            return False
-        return True
+            except sources.InvalidMetaDataException as e:
+                util.logexc(LOG, str(e))
+                LOG.info(
+                    "No DHCP-enabled interfaces available, "
+                    "unable to fetch metadata for %s",
+                    server_uuid,
+                )
+                return False
+            return True
 
     @property
     def network_config(self):
