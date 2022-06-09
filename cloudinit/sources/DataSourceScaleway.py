@@ -9,7 +9,7 @@ import json
 import os
 import socket
 import time
-
+import hashlib
 import requests
 
 # pylint fails to import the two modules below.
@@ -36,6 +36,7 @@ LOG = logging.getLogger(__name__)
 
 DS_BASE_URL = "http://169.254.42.42"
 SCW_METADATA_AUTH_TOKEN = "X-Metadata-Auth-Token"
+SCW_METADATA_AUTH_FINGERPRINT = "X-Metadata-Auth-Fingerprint"
 
 BUILTIN_DS_CONFIG = {
     "metadata_url": DS_BASE_URL + "/conf?format=json",
@@ -200,8 +201,19 @@ class DataSourceScaleway(sources.DataSource):
         # Scaleway Baremetal product use X-Metadata-Auth-Token
         authToken = self.ds_cfg.get("token", None)
         if authToken is not None:
-            self.headers_redact = SCW_METADATA_AUTH_TOKEN
+            self.headers_redact = [SCW_METADATA_AUTH_TOKEN]
             self.headers = {SCW_METADATA_AUTH_TOKEN: authToken}
+
+        fingerprint = generate_machine_fingerprint()
+        if fingerprint is not None:
+            if self.headers_redact is None:
+                self.headers_redact = [SCW_METADATA_AUTH_FINGERPRINT]
+            else:
+                self.headers_redact.append(fingerprint)
+            if self.headers is None:
+                self.headers = {SCW_METADATA_AUTH_FINGERPRINT: fingerprint} 
+            else:
+                self.headers[SCW_METADATA_AUTH_FINGERPRINT] = fingerprint
 
         self.retries = int(self.ds_cfg.get("retries", DEF_MD_RETRIES))
         self.timeout = int(self.ds_cfg.get("timeout", DEF_MD_TIMEOUT))
@@ -347,3 +359,16 @@ def get_first_connected_interface():
         return iface
 
     return None
+
+# Generate machine fingerprint by it's motherboard serial number
+def generate_machine_fingerprint():
+    motherboard_serial_number = dmi.read_dmi_data("board_serial")
+    if motherboard_serial_number is None:
+        return None
+    
+    iface = get_first_connected_interface()
+    ip = os.popen('ip addr show '+ iface +' | grep "\<inet\>" | awk \'{ print $2 }\' | awk -F "/" \'{ print $1 }\'').read().rstrip("\n")
+    if ip is None:
+        return None
+    
+    return hashlib.sha1(str.encode(motherboard_serial_number+ip)).hexdigest()
